@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CITY RUSH — Smooth Lane Change</title>
+<style>
+:root{color-scheme:dark}
+body{margin:0;padding:18px;background:#0b1220;color:#f1f5f9;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+#citySmooth{max-width:600px;margin:auto;background:#101827;border-radius:16px;padding:14px;box-sizing:border-box}
+#citySmooth *{box-sizing:border-box}
+.head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-bottom:10px}
+.stat{background:#202d40;border-radius:9px;padding:8px;text-align:center}.stat small{display:block;color:#aab8ca;font-size:11px}.stat b{font-size:19px}
+canvas{display:block;width:100%;height:auto;max-width:480px;margin:auto;border-radius:10px;background:#273548}
+button{border:1px solid #52647a;border-radius:9px;background:#26364b;color:#fff;padding:10px 11px;font-weight:650;cursor:pointer;touch-action:manipulation}
+button:active{transform:scale(.98)}.primary{background:#f472b6;color:#251027;border-color:#f9a8d4}
+.buttons{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+.controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:9px}.controls button{padding:12px 2px;font-size:12px}
+.status{margin-top:10px;background:#1b293a;border:1px solid #35465b;border-radius:10px;padding:10px;font-size:13px;line-height:1.5}
+.hint{font-size:12px;color:#aebbd0;line-height:1.5;margin-top:8px}
+.pill{font-size:11px;background:#26364b;border-radius:99px;padding:6px 9px}
+</style>
+</head>
+<body>
+<div id="citySmooth">
+  <div class="head">
+    <div><div style="font-size:21px;font-weight:850;letter-spacing:1px">CITY RUSH</div><div style="font-size:12px;color:#aebbd0">Smooth Lane Change · Traffic Assist</div></div>
+    <span id="csMode" class="pill">자율주행 모드</span>
+  </div>
+  <div class="stats">
+    <div class="stat"><small>속도</small><b><span id="csSpeed">0</span><span style="font-size:11px"> km/h</span></b></div>
+    <div class="stat"><small>주행 점수</small><b id="csScore">0</b></div>
+    <div class="stat"><small>앞차 간격</small><b><span id="csGap">--</span><span style="font-size:11px"> m</span></b></div>
+  </div>
+  <canvas id="csCanvas" width="480" height="640" aria-label="도심 자동차 주행 게임"></canvas>
+  <div class="status" aria-live="polite"><b id="csTitle">시작 대기 중</b><div id="csDetail">시작 버튼을 눌러 주행하세요.</div></div>
+  <div class="buttons">
+    <button id="csStart" class="primary">▶ 시작</button>
+    <button id="csModeBtn">수동 운전으로 전환</button>
+    <button id="csReset">↻ 재시작</button>
+  </div>
+  <div class="controls">
+    <button id="csLeft">◀ 왼쪽</button><button id="csBrake">브레이크</button><button id="csGas">가속</button><button id="csRight">오른쪽 ▶</button>
+  </div>
+  <div class="hint">키보드: ← → 차선 변경 · ↑ 가속 · ↓ 감속. 차선 변경은 부드러운 애니메이션으로 진행돼. 자율주행은 앞차와 옆 차선의 앞·뒤 차량을 확인해.</div>
+</div>
+<script>
+(function(){
+  const root=document.getElementById('citySmooth');
+  const $=id=>document.getElementById(id);
+  const canvas=$('csCanvas'),ctx=canvas.getContext('2d');
+  const lanes=[134,240,346],playerY=520;
+  const colors=['#60a5fa','#f87171','#a78bfa','#34d399','#fbbf24','#e5e7eb'];
+  let running=false,auto=true,speed=0,score=0,roadOffset=0,spawnTimer=0,lastTime=0;
+  let carX=lanes[1],lane=1,fromX=lanes[1],toX=lanes[1],changeTime=0,changeDuration=.42;
+  let traffic=[],gas=false,brake=false,manualSteer=0,targetSpeed=0,statusText='차선 중앙 주행 중';
+  let rafId=0,session=0,frameCount=0;
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  function setStatus(a,b){$('csTitle').textContent=a;$('csDetail').textContent=b}
+  function getFront(l){
+    let best=null;
+    for(const t of traffic){const d=playerY-t.y;if(t.lane===l&&d>0&&(!best||d<playerY-best.y))best=t}
+    return best;
+  }
+  function nearestRear(l){
+    let best=null;
+    for(const t of traffic){const d=t.y-playerY;if(t.lane===l&&d>0&&(!best||d<best.y-playerY))best=t}
+    return best;
+  }
+  function laneIsSafe(l){
+    if(l<0||l>2)return false;
+    for(const t of traffic){
+      if(t.lane!==l)continue;
+      const d=playerY-t.y;
+      if(d>0&&d<205)return false;
+      if(d<0){const rearGap=-d,closing=t.v-speed;if(rearGap<155)return false;if(closing>8&&rearGap<255)return false}
+    }
+    return true;
+  }
+  function beginLaneChange(next){
+    if(next<0||next>2||next===lane||changeTime>0||!laneIsSafe(next))return false;
+    fromX=carX;toX=lanes[next];lane=next;changeTime=.0001;
+    statusText='안전한 차선으로 부드럽게 변경 중';return true;
+  }
+  function updateLaneAnimation(dt){
+    if(changeTime<=0){carX=lanes[lane];return}
+    changeTime+=dt;const p=clamp(changeTime/changeDuration,0,1),smooth=p*p*(3-2*p);
+    carX=fromX+(toX-fromX)*smooth;
+    if(p>=1){carX=toX;changeTime=0}
+  }
+  function ai(dt){
+    const f=getFront(lane),gap=f?playerY-f.y:9999,closing=f?speed-f.v:0;
+    targetSpeed=gas?140:110;if(brake)targetSpeed=0;
+    if(changeTime<=0&&f&&gap<235&&closing>0){
+      const candidates=[lane-1,lane+1].filter(l=>l>=0&&l<=2&&laneIsSafe(l));
+      candidates.sort((a,b)=>{
+        const fa=getFront(a),fb=getFront(b),frontA=fa?playerY-fa.y:9999,frontB=fb?playerY-fb.y:9999;
+        const ra=nearestRear(a),rb=nearestRear(b),rearA=ra?ra.y-playerY:9999,rearB=rb?rb.y-playerY:9999;
+        return (frontB+Math.min(rearB,500)*.25)-(frontA+Math.min(rearA,500)*.25);
+      });
+      if(candidates.length&&beginLaneChange(candidates[0]))targetSpeed=Math.min(targetSpeed,115);
+      else{
+        if(gap<65)targetSpeed=Math.min(targetSpeed,Math.max(0,f.v-6));
+        else if(gap<115)targetSpeed=Math.min(targetSpeed,Math.max(0,f.v+(gap-70)*.25));
+        else targetSpeed=Math.min(targetSpeed,Math.max(0,f.v+(gap-115)*.38));
+        statusText='회피 공간 확인 중 · 감속';
+      }
+    }else if(f&&gap<270){targetSpeed=Math.min(targetSpeed,Math.max(0,f.v+(gap-125)*.4));statusText='앞차와 안전거리 유지 중'}
+    else if(changeTime>0)statusText='차선 변경 애니메이션 진행 중';
+    else statusText='차선 중앙 주행 중';
+    const rate=targetSpeed<speed?190:35;
+    speed+=Math.sign(targetSpeed-speed)*Math.min(Math.abs(targetSpeed-speed),rate*dt);
+    speed=clamp(speed,0,150);
+    const now=getFront(lane);
+    if(now){const d=playerY-now.y;if(d<80)speed=Math.min(speed,Math.max(0,now.v-5));if(d<42&&now.v<7)speed=0}
+  }
+  function manual(dt){
+    targetSpeed=brake?0:(gas?140:80);
+    speed+=Math.sign(targetSpeed-speed)*Math.min(Math.abs(targetSpeed-speed),(targetSpeed<speed?170:40)*dt);
+    speed=clamp(speed,0,150);
+    if(manualSteer&&changeTime<=0){
+      const next=clamp(lane+manualSteer,0,2);
+      if(next!==lane){fromX=carX;toX=lanes[next];lane=next;changeTime=.0001}
+      manualSteer=0;
+    }
+    statusText=changeTime>0?'차선 변경 중':'수동 운전 중';
+  }
+  function drawCar(x,y,color,player){
+    ctx.save();ctx.translate(x,y);
+    ctx.fillStyle='rgba(0,0,0,.24)';ctx.fillRect(-22,-23,44,53);
+    ctx.fillStyle=color;ctx.beginPath();ctx.roundRect(-18,-30,36,60,8);ctx.fill();
+    ctx.fillStyle='#b9e8f5';ctx.beginPath();ctx.roundRect(-13,-21,26,15,4);ctx.fill();
+    ctx.fillStyle='#1e293b';ctx.fillRect(-13,4,26,13);
+    ctx.fillStyle='#fef3c7';ctx.fillRect(-15,-27,7,4);ctx.fillRect(8,-27,7,4);
+    ctx.fillStyle='#ef4444';ctx.fillRect(-15,23,7,4);ctx.fillRect(8,23,7,4);
+    ctx.fillStyle='#111827';ctx.fillRect(-22,-19,5,12);ctx.fillRect(17,-19,5,12);ctx.fillRect(-22,12,5,12);ctx.fillRect(17,12,5,12);
+    if(player){ctx.strokeStyle='#f9a8d4';ctx.lineWidth=3;ctx.strokeRect(-22,-34,44,68)}
+    ctx.restore();
+  }
+  function draw(){
+    ctx.clearRect(0,0,480,640);ctx.fillStyle='#243b35';ctx.fillRect(0,0,480,640);
+    for(let i=0;i<8;i++){
+      const y=(i*100+roadOffset*1.2)%760-100;
+      ctx.fillStyle=i%2?'#344357':'#3b4b60';ctx.fillRect(5,y,62,66);ctx.fillRect(413,y+32,62,66);
+      ctx.fillStyle='#64748b';
+      for(let r=0;r<3;r++)for(let c=0;c<2;c++){ctx.fillRect(13+c*24,y+10+r*17,10,8);ctx.fillRect(421+c*24,y+42+r*17,10,8)}
+    }
+    ctx.fillStyle='#303744';ctx.fillRect(80,0,320,640);ctx.fillStyle='#cbd5e1';ctx.fillRect(80,0,4,640);ctx.fillRect(396,0,4,640);
+    ctx.fillStyle='#f8fafc';for(const x of [186,291])for(let y=-90+roadOffset;y<650;y+=90)ctx.fillRect(x-2,y,4,48);
+    if(auto){ctx.strokeStyle='rgba(244,114,182,.32)';ctx.lineWidth=2;ctx.setLineDash([7,8]);ctx.beginPath();ctx.moveTo(lanes[lane],0);ctx.lineTo(lanes[lane],640);ctx.stroke();ctx.setLineDash([])}
+    for(const t of traffic)drawCar(lanes[t.lane],t.y,t.color,false);
+    const direction=toX-fromX,angle=changeTime>0?Math.sin(Math.PI*clamp(changeTime/changeDuration,0,1))*(direction>0?1:-1)*.055:0;
+    ctx.save();ctx.translate(carX,playerY);ctx.rotate(angle);ctx.translate(-carX,-playerY);drawCar(carX,playerY,'#f472b6',true);ctx.restore();
+    ctx.fillStyle='rgba(10,17,28,.82)';ctx.fillRect(91,12,298,34);ctx.fillStyle='#fff';ctx.font='bold 13px system-ui';ctx.textAlign='center';ctx.fillText(auto?'AUTO PILOT · SMOOTH LANE CHANGE':'MANUAL DRIVE',240,34);
+    if(auto){ctx.fillStyle='rgba(10,17,28,.82)';ctx.fillRect(85,570,310,30);ctx.fillStyle='#fbcfe8';ctx.font='12px system-ui';ctx.fillText(statusText,240,589)}
+    if(!running){ctx.fillStyle='rgba(7,13,24,.58)';ctx.fillRect(80,245,320,105);ctx.fillStyle='#fff';ctx.font='bold 22px system-ui';ctx.fillText('READY',240,285);ctx.font='13px system-ui';ctx.fillText('시작 버튼을 눌러 주행하세요',240,315)}
+  }
+  function updateUI(){
+    $('csSpeed').textContent=Math.round(speed);$('csScore').textContent=Math.floor(score);
+    const f=getFront(lane);$('csGap').textContent=f?Math.max(0,Math.round((playerY-f.y)/18)):'--';
+    $('csMode').textContent=auto?'자율주행 모드':'수동 운전 모드';$('csModeBtn').textContent=auto?'수동 운전으로 전환':'자율주행으로 전환';
+  }
+  function reset(){
+    session++;if(rafId)cancelAnimationFrame(rafId);
+    running=false;speed=0;score=0;roadOffset=0;spawnTimer=0;lastTime=0;
+    lane=1;carX=lanes[1];fromX=carX;toX=carX;changeTime=0;gas=false;brake=false;manualSteer=0;targetSpeed=0;
+    traffic=[{lane:1,y:315,v:42,color:'#f87171'},{lane:0,y:25,v:57,color:'#60a5fa'},{lane:2,y:-175,v:47,color:'#a78bfa'},{lane:0,y:-360,v:38,color:'#34d399'}];
+    statusText='차선 중앙 주행 중';setStatus('시작 대기 중','시작 버튼을 눌러 주행하세요.');updateUI();draw();
+  }
+  function tick(ts,mySession){
+    if(!running||mySession!==session)return;
+    const dt=lastTime?Math.min(.033,Math.max(.001,(ts-lastTime)/1000)):.016;lastTime=ts;
+    if(auto)ai(dt);else manual(dt);updateLaneAnimation(dt);
+    roadOffset=(roadOffset+speed*dt*1.5)%90;score+=speed*dt*.12;spawnTimer+=dt;
+    if(spawnTimer>1.25&&traffic.length<9){
+      spawnTimer=0;const l=Math.floor(Math.random()*3);
+      if(!traffic.some(t=>t.lane===l&&t.y<120&&t.y>-130))traffic.push({lane:l,y:-85,v:30+Math.random()*55,color:colors[Math.floor(Math.random()*colors.length)]});
+    }
+    for(const t of traffic)t.y+=(speed-t.v)*dt*1.05;
+    traffic=traffic.filter(t=>t.y<720&&t.y>-230);
+    for(const t of traffic){
+      if(t.lane===lane&&Math.abs(t.y-playerY)<47){
+        if(auto){speed=Math.min(speed,Math.max(0,t.v-5));if(Math.abs(t.y-playerY)<34&&t.v<7)speed=0}
+        else if(Math.abs(t.y-playerY)<34){running=false;setStatus('충돌 발생','재시작을 눌러 다시 도전하세요.');break}
+      }
+    }
+    if(auto&&running)setStatus(statusText.includes('감속')?'감속 및 안전거리 확보 중':'자율주행 중',statusText+'. 옆 차선 후방 차량을 확인합니다.');
+    draw();if(frameCount++%3===0)updateUI();
+    if(running)rafId=requestAnimationFrame(t=>tick(t,mySession));
+  }
+  function start(){if(running)return;running=true;lastTime=0;const s=++session;setStatus('주행 중','주변 차량과 차간거리를 감지합니다.');rafId=requestAnimationFrame(t=>tick(t,s))}
+  $('csStart').addEventListener('click',start);$('csReset').addEventListener('click',reset);
+  $('csModeBtn').addEventListener('click',()=>{auto=!auto;gas=false;brake=false;statusText='차선 중앙 주행 중';updateUI();draw();setStatus(auto?'자율주행 모드로 전환':'수동 운전 모드로 전환',auto?'앞차와 옆 차선 차량을 확인하며 차선을 변경합니다.':'방향 버튼 또는 화살표 키로 차선을 변경하세요.')});
+  $('csLeft').addEventListener('click',()=>{if(!auto)manualSteer=-1});$('csRight').addEventListener('click',()=>{if(!auto)manualSteer=1});
+  function hold(id,fn){const el=$(id);el.addEventListener('pointerdown',e=>{e.preventDefault();fn(true)});['pointerup','pointercancel','pointerleave'].forEach(ev=>el.addEventListener(ev,()=>fn(false)))}
+  hold('csGas',v=>gas=v);hold('csBrake',v=>brake=v);
+  window.addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))e.preventDefault();if(e.key==='ArrowUp')gas=true;if(e.key==='ArrowDown')brake=true;if(!auto&&e.key==='ArrowLeft')manualSteer=-1;if(!auto&&e.key==='ArrowRight')manualSteer=1});
+  window.addEventListener('keyup',e=>{if(e.key==='ArrowUp')gas=false;if(e.key==='ArrowDown')brake=false});
+  reset();
+})();
+</script>
+</body>
+</html>
